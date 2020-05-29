@@ -192,3 +192,10 @@ WQ_API void *libwq_malloc(size_t size);
 WQ_API void libwq_free(void *mem);
 WQ_API void libwq_print_heap();
 
+WQ_API void SP_using();
+WQ_API void *SP_malloc(size_t size, int refer);
+WQ_API void *SP_ref(void *spmem);
+WQ_API void SP_unref(void *spmem);
+WQ_API void SP_free(void *spmem);
+WQ_API void SP_unused();
+
