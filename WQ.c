@@ -222,3 +222,20 @@ WQ_API _dword WQ_send(struct WQ *wq, void *par, _dword npar, _dword time, int fl
 		}
 		return WQ_SIGNALED;
 }
+WQ_API int WQ_parameter_size(struct WQ *wq)
+{
+	if(!wq)
+	{
+		return -1;
+	}
+
+	return wq->element_1_size;
+}
+WQ_API int WQ_parameter_length(struct WQ *wq)
+{
+	if(!wq)
+	{
+		return -1;
+	}
+	return wq->element_length;
+}

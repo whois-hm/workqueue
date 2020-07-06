@@ -4,8 +4,7 @@
  	 making about NetworkGroup Framework, like observer pattern.
  	 we offer the thread group communication, using workqueue event or notification
  */
-struct net_router;
-struct net_host;
+
 enum cast
 {
 	unicast,
@@ -19,59 +18,6 @@ struct default_par
 	unsigned _host;
 	unsigned _route_id;
 	enum cast _cast;
-};
-
-struct net_host_register_data
-{
-	/*
-	 	 in host meta data create
-	 	 return : host's meta data
-	 */
-
-	void (*_register_init)(struct net_router *router,
-			struct net_host *host,
-			void **meta,
-			int connect);
-	/*
-	 	receive the other unicast
-	 */
-	void (*_recv_from_unicast)(struct net_router *router,
-			struct net_host *host,
-			void *meta,
-			void *expar,
-			unsigned exnpar,
-			unsigned fromhost);
-	/*
-	 	 receive the other broadcast
-	 */
-	void (*_recv_from_broadcast)(struct net_router *router,
-			struct net_host *host,
-			void *meta,
-			void *expar,
-			unsigned exnpar,
-			unsigned fromhost);
-	/*
-	 	 receive the other multicast event
-	 */
-	void (*_recv_from_multicast)(struct net_router *router,
-			struct net_host *host,
-			void *meta,
-			void *expar,
-			unsigned exnpar,
-			unsigned fromhost,
-			unsigned route_id);
-
-	/*
-	 	 host meta data delete
-	 	 void *meta : in "_register_init" function return pointer
-	 */
-	void (*_register_deinit)(struct net_router *router,
-			struct net_host *host,
-			void *meta,
-			int disconnect);
-	unsigned _max_queuesize;
-	unsigned _queue_length;
-	unsigned _host_name;
 };
 struct net_host_alarm
 {
@@ -94,6 +40,14 @@ struct net_host
 	struct net_host_register_data _register_data;
 	void *_meta;
 };
+struct _router_message_unicast_to
+{
+	struct _router_message_unicast_to *next_to;
+	int _sock;
+	criticalsection _cs;
+	struct _router_message_buffer _messagebuffer;
+	struct sockaddr_in _in;
+};
 struct net_router
 {
 	struct net_host *_net_hosts;
@@ -102,8 +56,157 @@ struct net_router
 	unsigned _max_routeindex;
 	unsigned _max_routeparsize;
 	unsigned _host_len;
-};
+	struct
+	{
+		struct BackGround *_thread;
+		struct _router_message_unicast_mapper *_cast_indexer;
+		int _port;
+		int _sock;
+		int _pipe[2];
+		_router_message_decoder _decoder;
+		unsigned buffersize;
+		char *pbuffer;
+		void *_parameter_copy;
+		unsigned _parameter_copy_len;
+	}message_server;
+	struct _router_message_unicast_to *_message_tos;
+	criticalsection _to_cs;
 
+};
+void NetGroup_host_unicast(struct net_host *target_host,
+		struct net_host *host,
+		void *par,
+		unsigned npar,
+		unsigned flag);
+static void message_server_start_routine(void *par)
+{
+	struct net_router *router = (struct net_router *)par;
+	int cursor = 0;
+	struct sockaddr_in clientaddr;
+	socklen_t clientaddr_size = sizeof(clientaddr);
+
+	fd_set readfds;
+	fd_set exceptfds;
+	int maxfd;
+	int nread = 0;
+	unsigned outlen = 0;
+	unsigned decoder_res = 0;
+	struct net_host *hosts = NULL;
+	int index = 0;
+	while(1)
+	{
+		FD_ZERO(&readfds);
+		FD_ZERO(&exceptfds);
+		maxfd = -1;
+
+		FD_SET(router->message_server._pipe[0], &readfds);
+		FD_SET(router->message_server._sock, &readfds);
+		FD_SET(router->message_server._pipe[0], &exceptfds);
+		FD_SET(router->message_server._sock, &exceptfds);
+		maxfd = router->message_server._sock > router->message_server._pipe[0] ?
+				router->message_server._sock :
+				router->message_server._pipe[0];
+
+		if(select(maxfd + 1, &readfds, NULL, &exceptfds, NULL) <= 0)
+		{
+			/*error. down server*/
+			break;
+		}
+
+		if(FD_ISSET(router->message_server._pipe[0], &exceptfds)/*pipe exception */ ||
+				FD_ISSET(router->message_server._sock, &exceptfds) /*socket exception*/||
+				FD_ISSET(router->message_server._pipe[0], &readfds) /*pipe reading, this mean we are done*/)
+		{
+			break;
+		}
+		if(FD_ISSET(router->message_server._sock, &readfds))
+		{
+
+			nread = recvfrom(router->message_server._sock,
+					router->message_server.pbuffer + cursor,
+					router->message_server.buffersize - cursor,
+					0,
+					(struct sockaddr *)&clientaddr,
+					&clientaddr_size);
+			if(nread <= 0 ||
+					(nread > (router->message_server.buffersize - cursor)))
+			{
+				/*reading error */
+				break;
+			}
+
+			cursor += nread;
+
+			/*notify to user*/
+			decoder_res = router->message_server._decoder(router->message_server.pbuffer,
+					nread,
+					inet_ntoa(clientaddr.sin_addr),
+					ntohs(clientaddr.sin_port),
+					router->message_server._parameter_copy,
+					router->message_server._parameter_copy_len,
+					&outlen,
+					router->message_server._cast_indexer,
+					router->_host_len);
+
+			if(outlen)
+			{
+				/*loop list. we save the array index by list, just find index*/
+				hosts = router->_net_hosts;
+				index = 0;
+				while(hosts)
+				{
+					if(router->message_server._cast_indexer[index]._bcast)
+					{
+						if(outlen <= (WQ_parameter_size(hosts->_queue) -
+								sizeof(struct default_par)))
+						{
+							NetGroup_host_unicast(hosts,
+									NULL/*-404*/,
+									router->message_server._parameter_copy,
+									outlen,
+									0/*send no sync*/);
+						}
+						/*index return*/
+						router->message_server._cast_indexer[index]._bcast = 0;
+					}
+					hosts = hosts->_nexthost;
+					index++;
+				}
+				outlen = 0;
+				memset(router->message_server._parameter_copy,
+						0,
+						router->message_server._parameter_copy_len);
+			}
+
+			/*delete the data, using from user*/
+			if(decoder_res)
+			{
+				/*max condition*/
+				if(decoder_res >= cursor)
+				{
+					decoder_res = cursor;
+				}
+				if(cursor - decoder_res > 0)
+				{
+					memcpy(router->message_server.pbuffer,
+							router->message_server.pbuffer + decoder_res,
+							cursor - decoder_res);
+				}
+				cursor -= decoder_res;
+			}
+			/*user callback no return the processed length.  for next buffer reading, data shift necessary*/
+			if(cursor >= router->message_server.buffersize)
+			{
+				memcpy(router->message_server.pbuffer,
+						router->message_server.pbuffer + router->message_server.buffersize / 2,
+						router->message_server.buffersize / 2);
+
+				cursor = router->message_server.buffersize / 2;
+			}
+
+		}
+	}
+}
 
 static unsigned host_parameter_size(unsigned hostpar, unsigned routepar)
 {
@@ -112,7 +215,7 @@ static unsigned host_parameter_size(unsigned hostpar, unsigned routepar)
 }
 static int host_routing(struct net_host *host, void *_par, unsigned _npar)
 {
-	struct net_router *router = host->_router;;
+	struct net_router *router = host->_router;
 	struct default_par *_defpar = NULL;
 	unsigned hostparsize = 0;
 	_defpar = (struct default_par *)_par;
@@ -334,8 +437,7 @@ void NetGroup_host_unicast(struct net_host *target_host,
 		unsigned npar,
 		unsigned flag)
 {
-	if(!target_host ||
-			!host)
+	if(!target_host)
 	{
 		return;
 	}
@@ -344,7 +446,7 @@ void NetGroup_host_unicast(struct net_host *target_host,
 	{
 		memcpy(dump + sizeof(struct default_par), par, npar);
 	}
-	((struct default_par *)dump)->_host = host->_register_data._host_name;
+	((struct default_par *)dump)->_host = host  ? host->_register_data._host_name : -404;
 	((struct default_par *)dump)->_cast = unicast;
 
 	WQ_send(target_host->_queue,
@@ -427,6 +529,135 @@ void NetGroup_host_multicast(struct net_host *host,
 		}
 	}
 }
+WQ_API void NetGroup_router_send_message_buffer_realloc(struct _router_message_buffer *b,
+		unsigned want,
+		int clear)
+{
+	if(!b)
+	{
+		return;
+	}
+
+	if(want)
+	{
+		if(want > b->_n)
+		{
+			if(b->_p)
+			{
+				libwq_free(b->_p);
+			}
+			b->_p = (char *)libwq_malloc(want);
+			b->_n = want;
+		}
+	}
+
+	if(clear > 0 && b->_p)
+	{
+		memset(b->_p, 0, b->_n);
+	}
+}
+WQ_API int NetGroup_router_send_message(struct net_router *router,
+		char const *ip,
+		int port,
+		void *par,
+		unsigned npar,
+		_router_message_encoder encoder)
+{
+	unsigned sendlen = 0;
+	unsigned sendlen_s = 0;
+	unsigned sendlen_t = 0;
+	unsigned sendedlen = 0;
+	struct _router_message_unicast_to *to;
+	struct _router_message_unicast_to *new_to;
+	uint32_t uip = 0;
+	uint16_t uport = 0;
+	if(!router ||
+			!ip ||
+			port <= 0 ||
+			!par ||
+			npar <= 0 ||
+			!encoder)
+	{
+		return -1;
+	}
+	uip = inet_addr(ip);
+	uport  = htons(port);
+
+	CS_lock(&router->_to_cs, INFINITE);
+
+	to = router->_message_tos;
+	while(to)
+	{
+		if(uip == to->_in.sin_addr.s_addr &&
+				uport == to->_in.sin_port)
+		{
+			break;
+		}
+		to = to->next_to;
+	}
+	if(!to)
+	{
+		new_to = (struct _router_message_unicast_to *)libwq_malloc(sizeof(struct _router_message_unicast_to));
+		new_to->_in.sin_family = AF_INET;
+		new_to->_in.sin_port = uport;
+		new_to->_in.sin_addr.s_addr = uip;
+		new_to->_sock = socket(PF_INET, SOCK_DGRAM, 0);
+		if(new_to->_sock < 0)
+		{
+			libwq_free(new_to);
+			CS_unlock(&router->_to_cs);
+			return -1;
+		}
+		if(CS_open(&new_to->_cs))
+		{
+			libwq_free(new_to);
+			CS_unlock(&router->_to_cs);
+			return -1;
+		}
+		to = router->_message_tos;
+		if(!to)
+		{
+			router->_message_tos = new_to;
+		}
+		else
+		{
+			while(to && to->next_to)
+			{
+				to = to->next_to;
+			}
+			to->next_to = new_to;
+		}
+		to = new_to;
+	}
+	CS_unlock(&router->_to_cs);
+
+	CS_lock(&to->_cs, INFINITE);
+	sendlen_s = sendlen = encoder(par, npar, &to->_messagebuffer);
+	sendedlen = 0;
+	while(sendlen > 0)
+	{
+		sendlen_t = sendto(to->_sock,
+				to->_messagebuffer._p + sendedlen,
+				sendlen - sendedlen,
+				MSG_DONTWAIT | MSG_NOSIGNAL,
+				(struct sockaddr *)&to->_in,
+				sizeof(to->_in));
+		if(sendlen_t <= 0)
+		{
+			break;
+		}
+		sendedlen += sendlen_t;
+		sendlen -= sendlen_t;
+	}
+
+	CS_unlock(&to->_cs);
+	if(sendlen_s == sendedlen)
+	{
+		return 1;
+	}
+	return 0;
+
+}
 
 
 struct net_host *NetGroup_host_connect(struct net_router * router,
@@ -459,27 +690,53 @@ void NetGroup_host_disconnect(struct net_host **targethost)
 void NetGroup_router_delete(struct net_router ** router)
 {
 	struct net_host *hosts = NULL;
+	struct _router_message_unicast_to *tos = NULL;
 	struct default_par par;
 	int i = 0;
+	char dump = 1;
 	if(!router ||
 			!*router)
 	{
 		return;
 	}
-	/*hosts resource unlink*/
+	/*uninstall message server if loaded*/
+	if((*router)->message_server._thread)
+	{
+		write((*router)->message_server._pipe[1], &dump, sizeof(char));
+		BackGround_turnoff(&(*router)->message_server._thread);
+		close((*router)->message_server._sock);
+		close((*router)->message_server._pipe[0]);
+		close((*router)->message_server._pipe[1]);
+		libwq_free((*router)->message_server.pbuffer);
+	}
+	if((*router)->message_server._parameter_copy)
+	{
+		libwq_free((*router)->message_server._parameter_copy);
+	}
 
+	/*hosts resource unlink*/
 	hosts = (*router)->_net_hosts;
-	if(hosts)
+	while(hosts)
 	{
 		par._cast = disconnect;
-		par._host = 0;
-		par._route_id = 0;
-		NetGroup_host_broadcast(hosts, (void *)&par, sizeof(struct default_par));
+		WQ_send(hosts->_queue,
+					(void *)&par,
+					sizeof(struct default_par),
+					INFINITE, 0);
 
+		hosts = hosts->_nexthost;
+	}
+	/*hosts close*/
+	hosts = (*router)->_net_hosts;
+	while(hosts)
+	{
 		par._cast = closing;
-		par._host = 0;
-		par._route_id = 0;
-		NetGroup_host_broadcast(hosts, (void *)&par, sizeof(struct default_par));
+		WQ_send(hosts->_queue,
+					(void *)&par,
+					sizeof(struct default_par),
+					INFINITE, 0);
+
+		hosts = hosts->_nexthost;
 	}
 	/*hosts resource free*/
 	while(hosts)
@@ -488,6 +745,24 @@ void NetGroup_router_delete(struct net_router ** router)
 		host_cleanup(&hosts);
 		hosts = (*router)->_net_hosts;
 	}
+
+	/*router message client delete*/
+	tos = (*router)->_message_tos;
+	while(tos)
+	{
+		(*router)->_message_tos = tos->next_to;
+		close(tos->_sock);
+		if(tos->_messagebuffer._n)
+		{
+			libwq_free(tos->_messagebuffer._p);
+		}
+		CS_close(&tos->_cs);
+		libwq_free(tos);
+		tos = (*router)->_message_tos;
+	}
+	CS_close(&(*router)->_to_cs);
+
+
 	/*routingtable free*/
 	if((*router)->_routetable )
 	{
@@ -506,19 +781,25 @@ void NetGroup_router_delete(struct net_router ** router)
 struct net_router *NetGroup_router_create(unsigned max_routeindex,
 		unsigned max_routeparsize,
 		struct net_host_register_data *phosts,
-		unsigned nhosts)
+		unsigned nhosts,
+		_router_message_decoder message_decoder,
+		int message_port,
+		unsigned message_buffer_size)
 {
+	/*
+	 	 local group -
+	 	 message send -
+	 	 message receive -
+	 */
 	struct net_router *router = NULL;
 	int host_len = 0;
 	int i = 0;
 	struct net_host *_hosts = NULL;
+	struct sockaddr_in   server_addr;
+	int opt = 0;
+	unsigned max_copylen = 0;
 	do
 	{
-		if(!phosts ||
-				nhosts <= 0)
-		{
-			break;
-		}
 		router = (struct net_router *)libwq_malloc(sizeof(struct net_router));
 		if(!router)
 		{
@@ -528,44 +809,127 @@ struct net_router *NetGroup_router_create(unsigned max_routeindex,
 		router->_max_routeparsize = max_routeparsize;
 		router->_max_routeindex = max_routeindex;
 
-		/*add hosts*/
-		while(host_len < router->_host_len)
+		/*add hosts if reqeust*/
+		if(phosts && nhosts > 0)
 		{
-			int res = host_in(router, phosts[host_len]);
-			if(res != WQOK)
+			while(host_len < router->_host_len)
 			{
+				int res = host_in(router, phosts[host_len]);
+				if(res != WQOK)
+				{
+					break;
+				}
+				host_len++;
+			}
+			if(host_len != router->_host_len)
+			{
+				/*any host can't insert to router */
 				break;
 			}
-			host_len++;
+			/*routing table create if need*/
+			if(router->_max_routeindex)
+			{
+				if(CS_open(&router->_routetable_cs))
+				{
+					/*can't sync to routing table*/
+					break;
+				}
+				router->_routetable = (struct net_host ***)libwq_malloc(sizeof(struct net_host) * router->_max_routeindex);
+				if(!router->_routetable)
+				{
+					break;
+				}
+				for(; i < router->_max_routeindex; i++)
+				{
+					/*now create table*/
+					router->_routetable[i] = (struct net_host **)	libwq_malloc(sizeof(struct net_host) * nhosts);
+					if(!router->_routetable[i])
+					{
+						break;
+					}
+				}
+			}
 		}
-		if(host_len != router->_host_len)
+
+		/*create message server if request*/
+		if(message_decoder &&
+				message_port &&
+				message_buffer_size)
 		{
-			/*any host can't insert to router */
-			break;
-		}
-		/*routing table create if need*/
-		if(router->_max_routeindex)
-		{
-			if(CS_open(&router->_routetable_cs))
+			router->message_server._port = message_port;
+			router->message_server._decoder = message_decoder;
+			router->message_server.buffersize = message_buffer_size;
+
+			/*buffer setup*/
+			router->message_server.pbuffer = (char *)libwq_malloc(router->message_server.buffersize);
+			if(!router->message_server.pbuffer)
 			{
-				/*can't sync to routing table*/
 				break;
 			}
-			router->_routetable = (struct net_host ***)libwq_malloc(sizeof(struct net_host) * router->_max_routeindex);
-			if(!router->_routetable)
+
+			/*indexer setup*/
+			router->message_server._cast_indexer = (struct _router_message_unicast_mapper *)libwq_malloc(sizeof(struct _router_message_unicast_mapper) * router->_host_len);
+			if(!router->message_server._cast_indexer)
 			{
 				break;
 			}
-			for(; i < router->_max_routeindex; i++)
+
+			_hosts = router->_net_hosts;
+			i = 0;
+			while(_hosts)
 			{
-				/*now create table*/
-				router->_routetable[i] = (struct net_host **)	libwq_malloc(sizeof(struct net_host) * nhosts);
-				if(!router->_routetable[i])
+				max_copylen = max_copylen < WQ_parameter_size(_hosts->_queue) ? WQ_parameter_size(_hosts->_queue) :  max_copylen;
+				router->message_server._cast_indexer[i++]._host_name = _hosts->_register_data._host_name;
+				_hosts = _hosts->_nexthost;
+			}
+			if(max_copylen)
+			{
+				router->message_server._parameter_copy_len = max_copylen-sizeof(struct default_par);
+				router->message_server._parameter_copy = libwq_malloc(router->message_server._parameter_copy_len);
+				if(!router->message_server._parameter_copy)
 				{
 					break;
 				}
 			}
+
+
+			/*pipe setup*/
+			if(pipe(router->message_server._pipe) < 0)
+			{
+				break;
+			}
+
+			/*socket setup*/
+
+			router->message_server._sock = socket(PF_INET, SOCK_DGRAM, 0);
+			if(router->message_server._sock < 0)
+			{
+				break;
+			}
+
+			memset(&server_addr, 0, sizeof(struct sockaddr_in));
+			server_addr.sin_family = AF_INET;
+			server_addr.sin_port = htons(message_port);
+			server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+			if(bind(router->message_server._sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1)
+			{
+				break;
+			}
+
+			opt = fcntl(router->message_server._sock, F_GETFL);
+			if(opt < 0)
+			{
+				break;
+			}
+			opt = (O_NONBLOCK | O_RDWR);
+			if(fcntl(router->message_server._sock, F_SETFL, opt) < 0)
+			{
+				break;
+			}
 		}
+
+
 
 		/*now run hosts*/
 		_hosts = router->_net_hosts;
@@ -574,6 +938,16 @@ struct net_router *NetGroup_router_create(unsigned max_routeindex,
 			_hosts->_thread = BackGround_turn(host_start_routine, _hosts);
 			_hosts = _hosts->_nexthost;
 		}
+
+		/*now run message server if request*/
+		if(message_decoder &&
+				message_port &&
+				message_buffer_size)
+		{
+			router->message_server._thread = BackGround_turn(message_server_start_routine, router);
+		}
+		/*create the route sendmessage syncronize*/
+		CS_open(&router->_to_cs);
 
 		return router;
 	}while(0);

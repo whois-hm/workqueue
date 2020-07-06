@@ -143,18 +143,92 @@ typedef pthread_t	threadid;
 #define WQ_SEND_FLAGS_BLOCK	(1 << 0)
 
 
-
-
 struct WQ;
 struct BackGround;
 struct Dictionary;
+struct net_router;
+struct net_host;
+struct net_host_alarm;
+
 typedef void (*BackGround_function)(void *p);
+struct net_host_register_data
+{
+	/*
+	 	 in host meta data create
+	 	 return : host's meta data
+	 */
+
+	void (*_register_init)(struct net_router *router,
+			struct net_host *host,
+			void **meta,
+			int connect);
+	/* receive the other unicast */
+	void (*_recv_from_unicast)(struct net_router *router,
+			struct net_host *host,
+			void *meta,
+			void *expar,
+			unsigned exnpar,
+			int fromhost);
+	/* receive the other broadcast */
+	void (*_recv_from_broadcast)(struct net_router *router,
+			struct net_host *host,
+			void *meta,
+			void *expar,
+			unsigned exnpar,
+			int fromhost);
+	/* receive the other multicast event */
+	void (*_recv_from_multicast)(struct net_router *router,
+			struct net_host *host,
+			void *meta,
+			void *expar,
+			unsigned exnpar,
+			unsigned fromhost,
+			int route_id);
+
+	/*
+	 	 host meta data delete
+	 	 void *meta : in "_register_init" function return pointer
+	 */
+	void (*_register_deinit)(struct net_router *router,
+			struct net_host *host,
+			void *meta,
+			int disconnect);
+	unsigned _max_queuesize;
+	unsigned _queue_length;
+	unsigned _host_name;
+};
+struct _router_message_unicast_mapper
+{
+	unsigned _host_name;
+	int _bcast;
+};
+typedef unsigned (*_router_message_decoder)(const void *read_buffer,
+		unsigned read_len,
+		char const *fromip,
+		int fromport,
+		void *pcopy,
+		unsigned ncopy,
+		unsigned *outlen,
+		struct _router_message_unicast_mapper *mappers,
+		unsigned mapper_max);
+
+struct _router_message_buffer
+{
+	char *_p;
+	unsigned _n;
+};
+typedef int (*_router_message_encoder)(void *par,
+		unsigned npar,
+		struct _router_message_buffer *b);
+
 
 
 WQ_API struct WQ *WQ_open(_dword size, _dword length);
 WQ_API void WQ_close(struct WQ **pwq);
 WQ_API _dword WQ_recv(struct WQ *wq, void **ppar, _dword *pnpar, _dword time);
 WQ_API _dword WQ_send(struct WQ *wq, void *par, _dword npar, _dword time, int flags);
+WQ_API int WQ_parameter_size(struct WQ *wq);
+WQ_API int WQ_parameter_length(struct WQ *wq);
 
 WQ_API struct BackGround *BackGround_turn(BackGround_function fn, void *p);
 WQ_API void BackGround_turnoff(struct BackGround **pb);
@@ -199,3 +273,48 @@ WQ_API void SP_unref(void *spmem);
 WQ_API void SP_free(void *spmem);
 WQ_API void SP_unused();
 
+
+WQ_API struct net_router *NetGroup_router_create(unsigned max_routeindex,
+		unsigned max_routeparsize,
+		struct net_host_register_data *phosts,
+		unsigned nhosts,
+		_router_message_decoder message_decoder,
+		int message_port,
+		unsigned message_buffer_size);
+WQ_API void NetGroup_router_delete(struct net_router ** router);
+WQ_API struct net_host *NetGroup_host_connect(struct net_router * router,
+		unsigned hostname);
+WQ_API void NetGroup_host_disconnect(struct net_host **targethost);
+WQ_API void NetGroup_host_unicast(struct net_host *target_host,
+		struct net_host *host,
+		void *par,
+		unsigned npar,
+		unsigned flag);
+WQ_API void NetGroup_host_broadcast(struct net_host *host,
+		void *par,
+		unsigned npar);
+WQ_API void NetGroup_host_multicast(struct net_host *host,
+		unsigned routeindex,
+		void *par,
+		unsigned npar);
+WQ_API int NetGroup_router_send_message(struct net_router *router,
+		char const *ip,
+		int port,
+		void *par,
+		unsigned npar,
+		_router_message_encoder encoder);
+WQ_API void NetGroup_router_send_message_buffer_realloc(struct _router_message_buffer *b,
+		unsigned want,
+		int clear);
+WQ_API void NetGroup_membership_join(unsigned routeindex,
+		struct net_router *router,
+		struct net_host *host);
+WQ_API void NetGroup_membership_drop(unsigned routeindex,
+		struct net_router *router,
+		struct net_host *host);
+WQ_API struct net_host_alarm *NetGroup_host_alarm_start(struct net_host *host,
+		void (*fn_alarm)(struct net_router *router, struct net_host *host, void *meta),
+		unsigned mstime,
+		int repeat);
+WQ_API void NetGroup_host_alarm_end(struct net_host *host,
+		struct net_host_alarm **alarm);
