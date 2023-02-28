@@ -114,6 +114,50 @@ int Platform_semephore_open(semaphore *sema, _dword init, _dword max)
 	return -1;
 #endif
 }
+struct _named_semaphore *Platform_semaphore_named_open(semaphore_named_par *par)
+{
+#if defined  (_platform_mingw) || defined(_platform_win)
+	return NULL;
+#else
+	struct _named_semaphore *nsem = (struct _named_semaphore *)libwq_malloc(sizeof(struct _named_semaphore));
+	if(!nsem)
+	{
+		return NULL;
+	}
+	memset(nsem, 0, sizeof(struct _named_semaphore));
+	sprintf(nsem->_name, "%s", par->key);
+	if(par->owner)
+	{
+		nsem->sem = sem_open(nsem->_name, (O_CREAT|O_EXCL), par->mode, par->initval);
+	}
+	else
+	{
+		nsem->sem = sem_open(nsem->_name, 0);
+	}
+	if(nsem->sem == SEM_FAILED)
+	{
+		libwq_free(nsem);
+		return NULL;
+	}
+	nsem->owner = par->owner;
+	return nsem;
+#endif
+}
+void Platform_semaphore_named_close(struct _named_semaphore *nsem)
+{
+#if defined  (_platform_mingw) || defined(_platform_win)
+#else
+	if(nsem)
+	{
+		sem_close(nsem->sem);
+		if(nsem->owner)
+		{
+			sem_unlink(nsem->_name);
+		}
+		libwq_free(nsem);
+	}
+#endif
+}
 void  Platform_semaphore_close(semaphore *sema)
 {
 #if defined  (_platform_mingw) || defined(_platform_win)
@@ -252,3 +296,73 @@ void Platform_criticalsection_unlock(criticalsection *cs)
 #endif
 
 }
+
+struct _shared_memory *Platform_create_shared_memory(shared_memory_par *par)
+{
+#if defined  (_platform_mingw) || defined(_platform_win)
+	return NULL;
+#elif defined (_platform_linux)
+	struct _shared_memory *sm = (struct _shared_memory *)libwq_malloc(sizeof(struct _shared_memory));
+	if(!sm)
+	{
+		return NULL;
+	}
+	sm->mapkey = par->mapkey;
+	sm->mode = par->flag;
+	sm->owner = par->owner;
+	sm->size = par->size;
+	sm->ptr = NULL;
+	sm->key = -1;
+
+	sm->key = shmget(sm->mapkey, sm->size, sm->owner ? (O_CREAT|O_EXCL) | sm->mode : sm->mode);
+	if(sm->key < 0)
+	{
+		libwq_free(sm);
+		return NULL;
+	}
+	sm->ptr = shmat(sm->key, NULL, 0);
+	if((void *)-1 == sm->ptr)
+	{
+		if(sm->owner)
+		{
+			shmctl(sm->key, IPC_RMID, 0);
+		}
+		libwq_free(sm);
+		return NULL;
+	}
+	return sm;
+#endif
+}
+void *Platform_shared_memory_reference(struct _shared_memory *sm)
+{
+#if defined  (_platform_mingw) || defined(_platform_win)
+	return NULL;
+#elif defined (_platform_linux)
+	return sm ? sm->ptr : NULL;
+#endif
+}
+int Platform_shared_memory_size(struct _shared_memory *sm)
+{
+#if defined  (_platform_mingw) || defined(_platform_win)
+	return -1;
+#elif defined (_platform_linux)
+	return sm->size;
+#endif
+}
+void Platform_delete_shared_memory(struct _shared_memory *sm)
+{
+#if defined  (_platform_mingw) || defined(_platform_win)
+
+#elif defined (_platform_linux)
+	if(sm)
+	{
+		shmdt(sm->ptr);
+		if(sm->owner)
+		{
+			shmctl(sm->key, IPC_RMID, 0);
+		}
+		libwq_free(sm);
+	}
+#endif
+}
+
